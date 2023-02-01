@@ -1,0 +1,352 @@
+---
+title: "Assignment 4"
+author: "Isabeau Lewis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+https://github.com/isabeaulewis/BIOL432_Assignment4
+
+# Setup
+
+Loading libraries:
+```{r}
+library(dplyr)
+library(pROC)
+library(e1071)
+library(tree)
+library(rpart)
+library(gbm)
+library(randomForest)
+library(ggplot2)
+```
+
+Loading theme:
+```{r}
+source("http://bit.ly/theme_pub")
+theme_set(theme_pub())
+```
+
+
+# Part I: Exploring the data
+## 1. Loading the data
+```{r}
+setwd("./data")
+dat<-read.csv("Cohen_CANCERSEEK_liquid_biopsy_2018_modified.csv")
+```
+
+## 2. Inspecting the data
+```{r}
+names(dat)
+```
+
+All the names look good.
+
+```{r}
+str(dat)
+```
+
+Tumor type, patient ID, and sample ID should all be set to factors:
+```{r}
+dat <- dat %>% 
+  mutate(Patient_ID = as.factor(Patient_ID),
+         Sample_ID = as.factor(Sample_ID),
+         Tumor_type = as.factor(Tumor_type))
+```
+
+Checking the updated structure:
+```{r}
+str(dat) #everything here looks good
+```
+
+```{r}
+head(dat)
+```
+
+```{r}
+tail(dat)
+```
+
+There are some NAs here. This will pose a problem, so I'll see which columns have NAs and then how many there are to see what I should do with them:
+
+```{r}
+# Seeing which columns have missing values
+dat %>%
+  select_if(function(x) any(is.na(x))) %>%
+  names() 
+
+# Seeing how many missing values there are
+colSums(is.na(dat))
+```
+
+
+Since there's only ever one missing value per row, I'll just remove the corresponding observation from the dataset:
+```{r}
+dat_r <- na.omit(dat)
+```
+
+```{r}
+dim(dat)
+dim(dat_r) # Only one row was removed
+```
+
+The only obvious thing about the data that needed cleaning up was its NA removal. Otherwise the structure and dimensionality look good.
+
+## 3. Running quality control
+
+I have already changed patient & sample ID and tumor type to factors, so there's no other quality control I need to do right now. It is not necessary to normalize the data for a random forest model because we aren't comparing between features, so they don't need to be on the same scale.
+
+## 4. Dimensions of the data frame
+```{r}
+dim(dat_r)
+```
+
+The final dimensions are 1803 rows and 42 columns.
+
+A table of the number of samples from each ``Tumor_type``:
+```{r}
+count(dat_r, Tumor_type)
+```
+
+Counting how many normal vs. tumor samples there are:
+```{r}
+count(dat_r, Tumor_type=="Normal")
+```
+
+There are 799 ``Normal`` samples and 1004 ``Tumor`` samples (of various types).
+
+## 5. Splitting the data into a training and a test dataset
+```{r}
+Rows<-c(1:nrow(dat_r))
+Train<-Rows %% 2==1
+Validate<-Rows %% 2==0
+
+dat_train<-dat[Train,]
+dat_validate<-dat[Validate,]
+
+head(dat_train)
+head(dat_validate)
+```
+
+
+# Part II: Decision tree
+
+## 1. Tree diagram with text
+Double-checking that tumor type is a factor:
+```{r}
+str(dat_train$Tumor_type) # It is
+```
+
+Getting only response and predictor variables:
+```{r}
+names(dat_train)
+```
+
+* This has patient ID and sample ID; we want only tumor type
+
+```{r}
+# Selecting only response and predictor variables:
+dat_train_r <- dplyr::select(dat_train, -c("Patient_ID":"Sample_ID"))
+head(dat_train_r)
+```
+
+Creating the tree:
+```{r}
+TumorTree<-tree(Tumor_type~., data=dat_train_r)
+plot(TumorTree)
+text(TumorTree, cex=0.7, adj=0)
+```
+
+## 2. Protein feature most influential for classifying samples
+The protein feature that was most influential for classifying samples was IL_8 (at the top of the tree).
+
+## 3. Using predict() to provide the confusion matrix
+```{r}
+# Selecting only response and predictor variables:
+dat_validate_r <- dplyr::select(dat_validate, -c("Patient_ID":"Sample_ID"))
+
+CatDat<-data.frame(Obs=dat_validate_r$Tumor_type, Pred=predict(TumorTree, dat_validate_r, type="class"))
+table(CatDat)
+```
+
+## 4. Finding the misclassification error rate
+```{r}
+MisClass<-CatDat %>%
+  filter(Obs!=Pred)
+nrow(MisClass)/nrow(CatDat)
+```
+
+The misclassification error rate was ~37%.
+
+## 5. Cancer types predicted accurately vs. inaccurately by the tree
+```{r}
+# Creating a dataframe of correctly-classified observations
+Correct<-CatDat %>%
+  filter(Obs==Pred)
+
+# Creating dataframes of the counts of correctly- vs. misclassified values by tumour type:
+CorrectCount<-count(Correct, Obs)
+MisCount<-count(MisClass, Obs)
+
+# Binding them together:
+class_dat<-full_join(CorrectCount, MisCount, by="Obs", suffix=c("correct", "miss"))
+head(class_dat)
+
+# Creating a column of 'success rate':
+class_dat <- class_dat %>%
+  mutate(success=(ncorrect/(ncorrect+nmiss)))
+arrange(class_dat, success)
+```
+
+
+The tree was able to predict colorectal and pancreatic cancer with some success (over 50%). Conversely, it especially struggled with esophageal, liver, and stomach cancer.
+
+
+# Part III: Random Forest
+## 1. Predicting classifications using my test dataset
+
+Running the randomforest function on my training dataset:
+```{r}
+noNA<-complete.cases(dat_train_r)
+dat_train_final<-dat_train_r[noNA,]
+TumorFor<-randomForest(Tumor_type~., data=dat_train_final,
+                     ntree=100, mtry=3, nodesize=5, importance=TRUE)
+TumorFor
+```
+
+Using predict() to get classifications:
+```{r}
+PredFor<-predict(TumorFor, dat_validate_r, type="class")
+head(PredFor)
+```
+
+Getting the confusion matrix:
+```{r}
+CatDat2<-data.frame(Obs=dat_validate_r$Tumor_type, Pred=predict(TumorFor, dat_validate_r, type="class"))
+table(CatDat2)
+```
+
+Getting the misclassification error rate:
+```{r}
+MisClass2<-CatDat2 %>%
+  filter(Obs!=Pred)
+nrow(MisClass2)/nrow(CatDat2)
+```
+
+The misclassification rate has dropped to just 25%. The use of random forests improved the ability to classify.
+
+## 2. A plot showing the significance of each feature in the model
+```{r fig1}
+library(tibble)
+tum_imp<-as.data.frame(TumorFor$importance)
+tum_imp<-rownames_to_column(tum_imp, "Feature")
+tum_imp<-tum_imp
+
+library(ggpubr)
+p_imp <- ggplot(data=tum_imp, aes(x=reorder(Feature, MeanDecreaseAccuracy), y=MeanDecreaseAccuracy)) +
+  geom_col() +
+  xlab("Feature") +
+  ylab("Importance")
+ggpar(p_imp, x.text.angle=45)
+```
+> Figure 1: The relative importance of 38 protein features in determining cancer type. Features (on the x-axis) are ordered by importance (on the y-axis), with the most important protein features on the right. Data was collected for 1803 patients with either no cancer or a type of cancer, noted by category in the data.
+
+# Part IV: Repeating the above with 'Cancer'/'Normal'
+## 0. Preparation
+Creating a new table where the dependent variable is cancer or normal:
+```{r}
+dat_b <- dat_r %>% 
+  mutate(Tumor_binary=recode(Tumor_type, Colorectum="Cancer", 
+                           Lung="Cancer",
+                           Breast="Cancer",
+                           Pancreas="Cancer",
+                           Ovary="Cancer",
+                           Esophagus="Cancer",
+                           Liver="Cancer",
+                           Stomach="Cancer",
+                           Normal="Normal")
+)
+unique(dat_b$Tumor_binary) # Made sure there were two levels; 'cancer' and 'normal'
+```
+
+```{r}
+str(dat_b$Tumor_binary) # Made sure this was a factor
+```
+
+Separating the dataset into training & validation datasets:
+```{r}
+Rows_b<-c(1:nrow(dat_b))
+Train_b<-Rows %% 2==1
+Validate_b<-Rows %% 2==0
+
+dat_train_b<-dat_b[Train_b,]
+dat_validate_b<-dat_b[Validate_b,]
+
+head(dat_train_b)
+head(dat_validate_b)
+
+noNAbb<-complete.cases(dat_validate_b)
+dat_validate_b<-dat_validate_b[noNAbb,]
+```
+
+Getting only the columns needed for our tree (i.e., features & response):
+```{r}
+# Selecting only response and predictor variables:
+dat_train_b <- dplyr::select(dat_train_b, -c("Patient_ID":"Tumor_type"))
+head(dat_train_b)
+```
+
+Running the randomForest model on my training dataset:
+```{r}
+noNAb<-complete.cases(dat_train_b)
+dat_b_final<-dat_train_b[noNAb,]
+BinaryFor<-randomForest(Tumor_binary~., data=dat_b_final,
+                     ntree=100, mtry=3, nodesize=5, importance=TRUE)
+BinaryFor
+```
+
+## 1. Providing the confusion matrix & misclassification error rate
+Confusion matrix:
+```{r}
+CatDat3<-data.frame(Obs=dat_validate_b$Tumor_binary, Pred=predict(BinaryFor, dat_validate_b, type="class"))
+table(CatDat3)
+```
+
+Misclassification error rate:
+```{r}
+MisClass3<-CatDat3 %>%
+  filter(Obs!=Pred)
+nrow(MisClass3)/nrow(CatDat3)
+```
+
+The model now has only a 6% misclassification rate!
+
+## 2. Plotting the significance of each feature in the random forest model
+```{r fig2}
+bin_imp<-as.data.frame(BinaryFor$importance)
+bin_imp<-rownames_to_column(bin_imp, "Feature")
+
+p_bin <- ggplot(data=bin_imp, aes(x=reorder(Feature, MeanDecreaseAccuracy), y=MeanDecreaseAccuracy)) +
+  geom_col() +
+  xlab("Feature") +
+  ylab("Importance")
+ggpar(p_bin, x.text.angle=45)
+```
+> Figure 2: The relative importance of 38 protein features in determining the presence of cancer/no cancer. Features (on the x-axis) are ordered by importance (on the y-axis), with the most important protein features on the right. Data was collected for 1803 patients with either no cancer or cancer.
+
+
+## 3. Top 2 protein features
+The top 2 protein features that were most influential for differentiating between samples with and without cancer were IL_8 (number 1) and IL_6 (number 2).
+
+## 4. Biological explanation
+These proteins may be influential for classifying tumor and normal blood biopsies if they are either up- or down-regulated in tumorous tissue. For instance, these proteins may be involved in cell division. Cancerous cells grow uncontrollably, so if there are high amounts of these proteins it may be indicative of tumour growth.
+
+## 5. My opinion of the model's usefulness
+In my opinion this model is useful for detecting cancer in blood samples using this panel of proteins. It had a 6% misclassification error rate when using our validation dataset. However, this misclassification rate jumps to ~25% when trying to distinguish between different types of cancer. Because of this, I would say that the model is best used to give a binary cancer/no cancer outcome, with proceeding tests to determine which type of cancer.
+
+
+
